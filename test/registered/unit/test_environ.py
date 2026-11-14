@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 import warnings
 from contextlib import ExitStack
@@ -142,12 +143,68 @@ class TestEnvField(unittest.TestCase):
             if envs.SGLANG_TEST_RETRACT or (1 == 1):
                 pass
 
-    def test_invalid_value_warns_and_returns_default(self):
-        os.environ["SGLANG_TEST_RETRACT"] = "not-a-bool"
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            self.assertIs(envs.SGLANG_TEST_RETRACT.get(), False)
-        self.assertIn("Invalid value", str(caught[0].message))
+    def test_invalid_values_raise_with_parser_diagnostic_and_cause(self):
+        for field, value, diagnostic in (
+            (envs.SGLANG_TEST_RETRACT, "not-a-bool", "not a valid boolean value"),
+            (envs.SGLANG_TIMEOUT_KEEP_ALIVE, "not-an-int", "not a valid integer value"),
+            (envs.SGLANG_WARMUP_TIMEOUT, "not-a-float", "not a valid float value"),
+            (
+                envs.SGLANG_HUMMING_ONLINE_QUANT_CONFIG,
+                "{broken",
+                "Expecting property name enclosed in double quotes",
+            ),
+        ):
+            with (
+                self.subTest(name=field.name),
+                field.override(value),
+                warnings.catch_warnings(record=True) as warnings_seen,
+            ):
+                warnings.simplefilter("always")
+                with self.assertRaises(ValueError) as caught:
+                    field.get()
+                error = caught.exception
+                self.assertIn(field.name, str(error))
+                self.assertIn(diagnostic, str(error))
+                self.assertIsInstance(error.__cause__, ValueError)
+                self.assertIn(str(error.__cause__), str(error))
+                self.assertEqual(warnings_seen, [])
+
+    def test_invalid_json_file_raises(self):
+        field = envs.SGLANG_HUMMING_ONLINE_QUANT_CONFIG
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as config:
+            config.write("{broken")
+            config.flush()
+            with field.override(config.name):
+                with self.assertRaisesRegex(ValueError, field.name):
+                    field.get()
+
+    def test_callable_default_is_only_evaluated_when_unset(self):
+        field = envs.SGLANG_TEST_RETRACT
+        with patch.object(field, "default", return_value=True) as default:
+            self.assertIs(field.get(), True)
+            self.assertIs(field.get(), True)
+            self.assertEqual(default.call_count, 2)
+            default.reset_mock()
+
+            for value, expected in (("false", False), (None, None)):
+                with self.subTest(value=value), field.override(value):
+                    self.assertIs(field.get(), expected)
+            with field.override("not-a-bool"):
+                with self.assertRaises(ValueError):
+                    field.get()
+            default.assert_not_called()
+
+    def test_valid_typed_values_are_preserved(self):
+        for field, value, expected in (
+            (envs.SGLANG_TEST_RETRACT, "YES", True),
+            (envs.SGLANG_TEST_RETRACT, "n", False),
+            (envs.SGLANG_TIMEOUT_KEEP_ALIVE, " 42 ", 42),
+            (envs.SGLANG_WARMUP_TIMEOUT, "2.5", 2.5),
+            (envs.SGLANG_HUMMING_ONLINE_QUANT_CONFIG, '{"key": [1]}', {"key": [1]}),
+            (envs.SGLANG_HUMMING_ONLINE_QUANT_CONFIG, "", None),
+        ):
+            with self.subTest(name=field.name, value=value), field.override(value):
+                self.assertEqual(field.get(), expected)
 
     def test_mega_runtime_defaults_and_registry_scope(self):
         with ExitStack() as stack:
@@ -222,10 +279,18 @@ class TestRenamedEnvAliases(unittest.TestCase):
 
     def test_new_name_wins_over_former_name(self):
         for new, old in RENAMED_NV_MEGA_RUNTIME_CHILDREN.items():
-            with self.subTest(new=new):
-                _, value, deprecations = self._read(new, {old: "1", new: "0"})
-                self.assertIs(value, False)
-                self.assertEqual(deprecations, [])
+            for old_value in ("1", "not-a-bool"):
+                with self.subTest(new=new, old_value=old_value):
+                    _, value, deprecations = self._read(new, {old: old_value, new: "0"})
+                    self.assertIs(value, False)
+                    self.assertEqual(deprecations, [])
+
+    def test_invalid_alias_or_canonical_value_raises(self):
+        for new, old in RENAMED_NV_MEGA_RUNTIME_CHILDREN.items():
+            for values in ({old: "not-a-bool"}, {old: "1", new: "not-a-bool"}):
+                with self.subTest(new=new, values=values):
+                    with self.assertRaisesRegex(ValueError, new):
+                        self._read(new, values)
 
 
 class TestDeprecatedEnvRegistry(unittest.TestCase):
