@@ -1,0 +1,95 @@
+name: Environment Linux Validation
+
+on:
+  push:
+    branches: [codex/validate-invalid-env-linux]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: read
+
+concurrency:
+  group: env-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-env:
+    name: Focused environment tests and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PYTHONPATH: python
+      SGLANG_CACHE_DIR: ${{ runner.temp }}/sglang-cache
+      HF_HOME: ${{ runner.temp }}/hf-cache
+      COVERAGE_FILE: ${{ runner.temp }}/env-coverage
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v5
+      - name: Install focused test dependencies with CPU PyTorch
+        env:
+          UV_SYSTEM_PYTHON: '1'
+        run: |
+          uv pip install 'torch==2.14.1' --index-url https://download.pytorch.org/whl/cpu
+          uv pip install aiohttp msgspec numpy 'openai==2.8.0' orjson packaging pillow psutil pybase64 requests regex 'transformers==5.19.0' coverage diff-cover
+      - name: Run normal test entry point under coverage
+        run: |
+          python -B -m coverage run --source=python/sglang/srt test/registered/unit/test_environ.py -v
+          python -m coverage xml --include='*/sglang/srt/environ.py' -o "$RUNNER_TEMP/env-coverage.xml"
+          diff-cover "$RUNNER_TEMP/env-coverage.xml" --compare-branch=fc33c59f3ea45be6dc074408400dfe297ee2e0d0 --fail-under=60 --json-report "$RUNNER_TEMP/env-diff-coverage.json"
+      - name: Upload focused coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: environment-coverage
+          path: |
+            ${{ runner.temp }}/env-coverage.xml
+            ${{ runner.temp }}/env-diff-coverage.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  lint-env:
+    name: Full repository pre-commit on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install build and lint dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev cmake ninja-build pkg-config libssl-dev
+          python -m pip install pre-commit PyYAML
+          bash scripts/ci/utils/install_rustup.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          shared-key: env-linux-lint
+      - name: Run every configured pre-commit hook
+        run: |
+          pre-commit run --all-files --show-diff-on-failure
+          git diff --exit-code
+
+  base-a-test-cpu:
+    uses: ./.github/workflows/_pr-test-stage-cpu.yml
+    with:
+      self_name: base-a-test-cpu
+      check_changes: '{"main_package":"true","continue_on_error":"true","partition_model_sha":""}'
+      caller_inputs: '{"skip_pr_test_health_check":true,"skip_cache_save":true}'
+      partitions: '{"base-a-test-cpu":{"arr":[0,1,2,3,4,5,6,7],"size":8,"max_parallel":8}}'
+      run_timeout_minutes: '90'
