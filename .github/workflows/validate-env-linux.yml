@@ -21,9 +21,6 @@ jobs:
     timeout-minutes: 25
     env:
       PYTHONPATH: python
-      SGLANG_CACHE_DIR: ${{ runner.temp }}/sglang-cache
-      HF_HOME: ${{ runner.temp }}/hf-cache
-      COVERAGE_FILE: ${{ runner.temp }}/env-coverage
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,6 +29,11 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v5
+      - name: Configure temporary runtime paths
+        run: |
+          echo "SGLANG_CACHE_DIR=$RUNNER_TEMP/sglang-cache" >> "$GITHUB_ENV"
+          echo "HF_HOME=$RUNNER_TEMP/hf-cache" >> "$GITHUB_ENV"
+          echo "COVERAGE_FILE=$RUNNER_TEMP/env-coverage" >> "$GITHUB_ENV"
       - name: Install focused test dependencies with CPU PyTorch
         env:
           UV_SYSTEM_PYTHON: '1'
